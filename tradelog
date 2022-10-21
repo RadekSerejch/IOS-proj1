@@ -1,0 +1,186 @@
+#!/bin/sh
+export POSIXLY_CORRECT=yes
+export LC_NUMERIC=en_US.UTF-8
+print_help(){
+  echo "Usage: tradelog [-h|--help]"
+  echo "       tradelog [FILTER...] [COMMAND] [LOG...]"
+  echo "Commands: list-tick   - výpis ze seznamu vyskytujících se burzových symbolů"
+  echo "          profit      - výpis celkového zisku z uzavřených pozic"
+  echo "          pos         - výpis hodnot aktuálně držených pozic seřazených sestupně dle hodnoty"
+  echo "          last-price  - výpis poslední známé ceny pro každý ticker"
+  echo "          hist-ord    - výpis histogramu počtu transakcí dle tickeru"
+  echo "          graph-pos   - výpis grafu hodnot držených pozic dle tickeru"
+  echo "Filters: -a DATETIME  - after: jsou uvažovány pouze záznamy PO tomto datu (bez tohoto data). DATETIME je formátu YYYY-MM-DD HH:MM:SS"
+  echo "         -b DATETIME  - before: jsou uvažovány pouze záznamy PŘED tímto datem (bez tohoto data)"
+  echo "         -t TICKER    - jsou uvažovány pouze záznamy odpovídající danému tickeru. Při více výskytech přepínače se bere množina všech uvedených tickerů"
+  echo "         -w WIDTH     - u výpisu grafů nastavuje jejich šířku, tedy délku nejdelšího řádku na WIDTH. Tedy, WIDTH musí být kladné celé číslo. Více výskytů přepínače je chybné spuštění"
+  echo "-h a --help vypíšou nápovědu s krátkým popisem každého příkazu a přepínače."
+}
+COMMAND=""
+LOG_FILES=""
+GZ_LOG_FILES=""
+READ_INPUT=""
+TICKER=""
+WIDTH=""
+BEFORE_TIME="3000-01-01 00:00:00"
+AFTER_TIME=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+  -h)
+    print_help
+    exit 0
+    ;;
+  --help)
+    print_help
+    exit 0
+    ;;
+  list-tick | profit | pos | last-price | hist-ord | graph-pos)
+    COMMAND="$1"
+    shift
+    ;;
+  -w)
+    if [ $WIDTH != "" ]; then
+      exit 1
+    fi
+    WIDTH="$2"
+    shift
+    shift
+    ;;
+  -t)
+    if [ "$TICKER" = "" ]; then
+      TICKER="$2"
+    else
+      TICKER="$2;$TICKER"
+    fi
+    shift
+    shift
+    ;;
+  -b)
+    BEFORE_TIME="$2"
+    shift
+    shift
+    ;;
+  -a)
+    AFTER_TIME="$2"
+    shift
+    shift
+    ;;
+  *.log)
+    LOG_FILES="$1 $LOG_FILES"
+    shift
+    ;;
+  *.log.gz)
+    GZ_LOG_FILES="$1 $GZ_LOG_FILES"
+    shift
+    ;;
+  esac
+done
+if [ "$GZ_LOG_FILES" = "" ] && [ "$LOG_FILES" != "" ]; then
+  READ_INPUT=$(cat $LOG_FILES | sort)
+elif [ "$GZ_LOG_FILES" != "" ]; then
+  READ_INPUT=$(gzip -d -c $GZ_LOG_FILES | cat $LOG_FILES - | sort)
+elif [ "$GZ_LOG_FILES" = "" ] && [ "$LOG_FILES" = "" ]; then
+  READ_INPUT=$(cat)
+fi
+
+READ_FILTERED="$READ_INPUT"
+if [ "$TICKER" != "" ]; then
+  READ_FILTERED="$(echo "$READ_FILTERED" | awk -F ';' -v TICKER="$TICKER" 'BEGIN{n = split(TICKER,TICKER_ARRAY)} {for(i=1;i<=n;i++) if($2 == TICKER_ARRAY[i]){print}}')"
+fi
+READ_FILTERED="$(echo "$READ_FILTERED" | awk -F ';' -v AFTER_TIME="$AFTER_TIME" -v BEFORE_TIME="$BEFORE_TIME"  '{if ($1 > AFTER_TIME && $1 < BEFORE_TIME) {print}}')"
+
+if [ "$COMMAND" = "list-tick" ]; then
+    READ_FILTERED=$(echo "$READ_FILTERED" | awk -F ';' '{a[$2]++} END{for(b in a) print b}' | sort)
+fi
+if [ "$COMMAND" = "profit" ]; then
+
+  READ_FILTERED="$(echo "$READ_FILTERED" | awk -F ';' ' { if($3=="buy") {BUY+=$4*$6} if($3=="sell") {SELL+=$4*$6} } END{printf("%.2f",SELL-BUY)}')"
+
+fi
+if [ "$COMMAND" = "pos" ]; then
+        TICKERS=$(echo "$READ_FILTERED" | awk -F ';' '{a[$2]++} END{for(b in a) print b}' | sort)
+        TICKER_ARRAY_STR=$(echo "$TICKERS" | awk -F ';' '{TEMP = TEMP$1";"} END{printf("%s",TEMP)}')
+        READ_FILTERED=$(echo "$READ_FILTERED" | awk -F ';' -v TICKER_ARRAY_STR="$TICKER_ARRAY_STR" 'BEGIN{n = split(TICKER_ARRAY_STR,TICKER_ARRAY,";")}
+                                                                BEGIN  {MAX_LENGTH=0}
+                                                                {for(i = 1; i < n; i++){
+                                                                if($2 == TICKER_ARRAY[i]){
+                                                                if($3 == "sell"){
+                                                                sell[i] += $6
+                                                                }
+                                                                if($3=="buy"){
+                                                                buy[i] += $6
+                                                                }
+                                                                PRICE[i]=$4
+                                                                }
+                                                                }
+                                                                }
+                                                                END{
+                                                                for(i = 1; i < n; i++){
+                                                                sum[i]=(buy[i]-sell[i]) * PRICE[i]
+                                                                temp=sprintf("%.2f",sum[i])
+                                                                if(length(temp) >= MAX_LENGTH){
+                                                                MAX_LENGTH = length(temp)
+                                                                }
+                                                                }
+                                                                for(i=1;i<n;i++){
+                                                                {printf("%-10s: %*.2f\n",TICKER_ARRAY[i],MAX_LENGTH,sum[i])}
+                                                                }
+                                                                }
+                                                                '|sort -r -n -t ':' -k2)
+
+fi
+if [ "$COMMAND" = "last-price" ]; then
+        TICKERS=$(echo "$READ_FILTERED" | awk -F ';' '{a[$2]++} END{for(b in a) print b}' | sort)
+        TICKER_ARRAY_STR=$(echo "$TICKERS" | awk -F ';' '{TEMP = TEMP$1";"} END{printf("%s",TEMP)}')
+        READ_FILTERED=$(echo "$READ_FILTERED" | awk -F ';' -v TICKER_ARRAY_STR="$TICKER_ARRAY_STR" 'BEGIN{n = split(TICKER_ARRAY_STR,TICKER_ARRAY,";")}
+                                                                BEGIN  {MAX_LENGTH=0}
+                                                                {for(i = 1; i < n; i++){
+                                                                if($2 == TICKER_ARRAY[i]){
+                                                                PRICE[i]=$4
+                                                                }
+                                                                }
+                                                                }
+                                                                END{
+                                                                for(i = 1; i < n; i++){
+                                                                temp=sprintf("%.2f",PRICE[i])
+                                                                if(length(temp) >= MAX_LENGTH){
+                                                                MAX_LENGTH = length(temp)
+                                                                }
+                                                                }
+                                                                for(i=1;i<n;i++){
+                                                                {printf("%-10s: %*.2f\n",TICKER_ARRAY[i],MAX_LENGTH,PRICE[i])}
+                                                                }
+                                                                }
+                                                                '|sort -t ':' )
+
+fi
+if [ "$COMMAND" = "hist-ord" ]; then
+    TICKERS=$(echo "$READ_FILTERED" | awk -F ';' '{a[$2]++} END{for(b in a) print b}' | sort)
+    TICKER_ARRAY_STR=$(echo "$TICKERS" | awk -F ';' '{TEMP = TEMP$1";"} END{printf("%s",TEMP)}')
+    READ_FILTERED=$(echo "$READ_FILTERED" | awk -F ';' -v TICKER_ARRAY_STR="$TICKER_ARRAY_STR" 'BEGIN{n = split(TICKER_ARRAY_STR,TICKER_ARRAY,";")}
+                                                                BEGIN{for(i = 1; i < n; i++){COUNT[i]=0}}
+                                                                {for(i = 1; i < n; i++){
+                                                                    if($2 == TICKER_ARRAY[i]){
+                                                                        COUNT[i]++
+                                                                    }
+                                                                 }
+                                                                }
+                                                                END{
+                                                                    for(i = 1; i < n; i++){
+                                                                        HIST_STR[i]=""
+                                                                        for(j = 1;j<=COUNT[i];j++){
+                                                                            ADD="#"
+                                                                            HIST_STR[i]=HIST_STR[i] ADD
+                                                                        }
+                                                                    }
+                                                                    for(i=1;i<n;i++){
+                                                                        {printf("%-10s: %*.2f\n",TICKER_ARRAY[i],MAX_LENGTH,HIST_STR[i])}
+                                                                    }
+                                                                }'|sort -t ':')
+fi
+#if [ "$COMMAND" = "graph-pos" ]; then
+  #TODO
+#fi
+
+echo "$READ_FILTERED"
+exit 0
